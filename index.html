@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Neon Voxel Builder</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet"/>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{background:#000;overflow:hidden;width:100vw;height:100vh}
+  #root{width:100%;height:100%;position:relative}
+  canvas{position:absolute;inset:0;display:block}
+  video{position:absolute;opacity:0;pointer-events:none;width:1px;height:1px}
+
+  .hud{
+    position:absolute;inset:0;pointer-events:none;
+    font-family:'Share Tech Mono',monospace;
+    display:flex;flex-direction:column;
+    justify-content:space-between;padding:14px;
+  }
+  .hud-top{display:flex;align-items:flex-start;justify-content:space-between}
+  .title{font-size:1rem;letter-spacing:.18em;color:#ff2dff;text-shadow:0 0 12px #ff2dff,0 0 28px #ff2dff55}
+  .title b{color:#00ffe7;text-shadow:0 0 12px #00ffe7}
+  .stats{text-align:right;font-size:.7rem;color:rgba(255,100,255,.5);line-height:2}
+  .stats em{color:#ff2dff;font-style:normal;text-shadow:0 0 8px #ff2dff}
+
+  .palette{display:flex;gap:5px;margin-top:8px;pointer-events:all;flex-wrap:wrap;max-width:420px}
+  .swatch{width:26px;height:26px;border-radius:3px;cursor:pointer;transition:transform .12s}
+  .swatch:hover{transform:scale(1.15)}
+  .swatch.active{transform:scale(1.3)}
+
+  .mode-badge{
+    position:absolute;bottom:58px;left:50%;transform:translateX(-50%);
+    font-family:'Share Tech Mono',monospace;font-size:.85rem;letter-spacing:.15em;
+    padding:5px 20px;border-radius:3px;pointer-events:none;white-space:nowrap;
+  }
+  .m-build{border:1px solid #ff2dff;color:#ff2dff;background:rgba(255,45,255,.07);text-shadow:0 0 8px #ff2dff}
+  .m-orbit{border:1px solid #ffd700;color:#ffd700;background:rgba(255,215,0,.07);text-shadow:0 0 8px #ffd700}
+  .m-erase{border:1px solid #00ffe7;color:#00ffe7;background:rgba(0,255,231,.07);text-shadow:0 0 8px #00ffe7}
+  .m-idle{border:1px solid rgba(255,255,255,.2);color:rgba(255,255,255,.3)}
+
+  .hud-bottom{display:flex;align-items:flex-end;gap:14px}
+  .hints{font-size:.58rem;color:rgba(255,120,255,.35);line-height:2.2;letter-spacing:.04em}
+  .hints b{color:#ff2dff;text-shadow:0 0 6px #ff2dff}
+  .clear-btn{
+    pointer-events:all;margin-left:auto;
+    background:rgba(0,255,231,.06);border:1px solid #00ffe7;
+    color:#00ffe7;font-family:'Share Tech Mono',monospace;
+    font-size:.7rem;padding:7px 16px;border-radius:3px;cursor:pointer;
+    text-shadow:0 0 6px #00ffe7;
+  }
+  .clear-btn:hover{background:rgba(0,255,231,.16)}
+
+  .corner{position:absolute;width:22px;height:22px;border-color:#ff2dff;border-style:solid;opacity:.4}
+  .tl{top:8px;left:8px;border-width:2px 0 0 2px}
+  .tr{top:8px;right:8px;border-width:2px 2px 0 0}
+  .bl{bottom:8px;left:8px;border-width:0 0 2px 2px}
+  .br{bottom:8px;right:8px;border-width:0 2px 2px 0}
+
+  .loading{
+    position:absolute;inset:0;background:#060408;z-index:50;
+    display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:14px;font-family:'Share Tech Mono',monospace;
+  }
+  .loading h1{font-size:1.4rem;color:#ff2dff;text-shadow:0 0 20px #ff2dff;letter-spacing:.2em}
+  .loading p{font-size:.72rem;color:rgba(255,45,255,.4);letter-spacing:.1em}
+  .bar{width:200px;height:2px;background:rgba(255,45,255,.15);border-radius:2px;overflow:hidden}
+  .bar-fill{height:100%;background:#ff2dff;box-shadow:0 0 8px #ff2dff;animation:lp 1.3s ease-in-out infinite}
+  @keyframes lp{0%{width:0}50%{width:75%}100%{width:100%}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+
+//color pallete
+const PAL = [
+  { name:"Pink",   color:"#ff2dff" },
+  { name:"Cyan",   color:"#00ffe7" },
+  { name:"Yellow", color:"#ffe600" },
+  { name:"Red",    color:"#ff3333" },
+  { name:"Green",  color:"#39ff14" },
+  { name:"Blue",   color:"#3d8eff" },
+  { name:"Orange", color:"#ff8c00" },
+  { name:"White",  color:"#ffffff" },
+];
+
+// Grid dimensions
+const COLS  = 19;   
+const ROWS  = 13;
+const CELL  = 30;   
+
+// 3D rotation   
+function rotY(x,y,z,a){ const c=Math.cos(a),s=Math.sin(a); return [c*x+s*z,y,-s*x+c*z]; }
+function rotX(x,y,z,a){ const c=Math.cos(a),s=Math.sin(a); return [x,c*y-s*z,s*y+c*z]; }
+
+
+function project(wx,wy,wz, yaw,pitch, W,H) {
+  let [x,y,z] = rotY(wx,wy,wz, yaw);
+  [x,y,z]     = rotX(x,y,z,   pitch);
+  const dz = 380 - z;
+  if (dz < 0.1) return null;
+  const f = 680;
+  
+  return [ x/dz*f + W/2,  -y/dz*f + H/2,  dz ];
+}
+
+
+function cellToWorld(col, row) {
+  return [ col*CELL,  -row*CELL,  0 ];
+}
+
+//GRID 
+function screenToCell(sx, sy, yaw, pitch, W, H) {
+  let bestCol=0, bestRow=0, bestDist=Infinity;
+  const hc = Math.floor(COLS/2);
+  const hr = Math.floor(ROWS/2);
+  for (let c=-hc; c<=hc; c++) {
+    for (let r=-hr; r<=hr; r++) {
+      const [wx,wy,wz] = cellToWorld(c,r);
+      const p = project(wx,wy,wz, yaw,pitch,W,H);
+      if (!p) continue;
+      const d = (p[0]-sx)**2 + (p[1]-sy)**2;
+      if (d < bestDist) { bestDist=d; bestCol=c; bestRow=r; }
+    }
+  }
+  return [bestCol, bestRow];
+}
+
+//NEON CUBESX
+function drawNeonCube(ctx, col, row, yaw, pitch, W, H, color, ghost=false) {
+  const [wx,wy,wz] = cellToWorld(col, row);
+  const S = CELL;
+
+  // 8 corners of this cube (centred on the cell)
+  const C = [];
+  for(let dx=0;dx<2;dx++) for(let dy=0;dy<2;dy++) for(let dz=0;dz<2;dz++)
+    C.push(project(wx+(dx-.5)*S, wy+(dy-.5)*S, wz+(dz-.5)*S, yaw,pitch,W,H));
+  const p = (dx,dy,dz) => C[dx*4+dy*2+dz];
+
+  const FACES = [
+    [p(0,0,0),p(1,0,0),p(1,1,0),p(0,1,0)],
+    [p(0,0,1),p(1,0,1),p(1,1,1),p(0,1,1)],
+    [p(0,0,0),p(0,0,1),p(0,1,1),p(0,1,0)],
+    [p(1,0,0),p(1,0,1),p(1,1,1),p(1,1,0)],
+    [p(0,1,0),p(1,1,0),p(1,1,1),p(0,1,1)],
+    [p(0,0,0),p(1,0,0),p(1,0,1),p(0,0,1)],
+  ];
+
+  ctx.save();
+  ctx.globalAlpha = ghost ? 0.38 : 0.95;
+
+  for (const face of FACES) {
+    if (face.some(v=>!v)) continue;
+    const ax=face[1][0]-face[0][0], ay=face[1][1]-face[0][1];
+    const bx=face[2][0]-face[0][0], by=face[2][1]-face[0][1];
+    if ((ax*by-ay*bx) > 0) continue; 
+
+    ctx.beginPath();
+    ctx.moveTo(face[0][0],face[0][1]);
+    for(let i=1;i<face.length;i++) ctx.lineTo(face[i][0],face[i][1]);
+    ctx.closePath();
+
+    ctx.fillStyle   = color + (ghost ? "0c" : "15");
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = ghost ? 1 : 1.8;
+    ctx.shadowColor = color;
+    ctx.shadowBlur  = ghost ? 5 : 16;
+    if (ghost) ctx.setLineDash([4,3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.shadowBlur  = 0;
+  }
+  ctx.restore();
+}
+
+
+function cellDepth(col, row, yaw, pitch, W, H) {
+  const [wx,wy,wz] = cellToWorld(col,row);
+  const p = project(wx,wy,wz, yaw,pitch,W,H);
+  return p ? p[2] : 9999;
+}
+
+//GESTURES PART
+
+// PINCH — thumb tip (4) close to index tip (8), simple distance only
+function isPinch(lm) {
+  return Math.hypot(lm[4].x-lm[8].x, lm[4].y-lm[8].y) < 0.08;
+}
+
+// FIST — all 4 fingers curled (tips below their MCP joints)
+function isFist(lm) {
+  return [8,12,16,20].every((tip,i) => lm[tip].y > lm[[5,9,13,17][i]].y);
+}
+
+// OPEN PALM — all 4 fingers clearly extended (tip well above MCP)
+function isOpenPalm(lm) {
+  return [8,12,16,20].every((tip,i) => lm[tip].y < lm[[5,9,13,17][i]].y);
+}
+
+//BACKEND LOGIC
+function App() {
+  const canvasRef = useRef(null);
+  const videoRef  = useRef(null);
+  const rafRef    = useRef(null);
+
+  const G = useRef({
+    voxels:    {},
+    colorIdx:  0,
+    yaw:       0,      
+    pitch:     0,
+    handVis:   false,
+    pinching:  false,
+    fisting:   false,
+    palming:   false,
+    tipX: 0.5, tipY: 0.5,
+    palmX: 0.5, palmY: 0.5,
+    prevPalmX: null, prevPalmY: null,
+    gcol: 0,   grow: 0,
+    lastKey:   null,
+    removeCd:  0,
+    landmarks: null,
+    particles: [],
+    prevPinch: false,
+  });
+
+  const [ready,    setReady]    = useState(false);
+  const [colorIdx, setColorIdx] = useState(0);
+  const [blocks,   setBlocks]   = useState(0);
+  const [mode,     setMode]     = useState("idle");
+
+  const pickColor = i => { G.current.colorIdx=i; setColorIdx(i); };
+  const clearWorld = useCallback(() => {
+    G.current.voxels={}; G.current.lastKey=null; setBlocks(0);
+  }, []);
+
+ 
+  const render = useCallback(() => {
+    const canvas = canvasRef.current;
+    const video  = videoRef.current;
+    if (!canvas||!video) { rafRef.current=requestAnimationFrame(render); return; }
+
+    const W   = canvas.width  = window.innerWidth;
+    const H   = canvas.height = window.innerHeight;
+    const ctx = canvas.getContext("2d");
+    const g   = G.current;
+
+    //camera part
+    if (video.readyState>=2 && video.videoWidth>0) {
+      ctx.save(); ctx.translate(W,0); ctx.scale(-1,1);
+      ctx.drawImage(video,0,0,W,H); ctx.restore();
+    } else {
+      ctx.fillStyle="#050208"; ctx.fillRect(0,0,W,H);
+    }
+    ctx.fillStyle="rgba(0,0,0,0.28)"; ctx.fillRect(0,0,W,H);
+
+    
+    if (g.palming && g.handVis) {
+      if (g.prevPalmX !== null) {
+        g.yaw   -= (g.palmX - g.prevPalmX) * 8.0;
+        g.pitch  = Math.max(-1.1, Math.min(1.1, g.pitch + (g.palmY - g.prevPalmY)*6.5));
+      }
+      g.prevPalmX = g.palmX;
+      g.prevPalmY = g.palmY;
+    } else {
+      g.prevPalmX = g.prevPalmY = null;
+    }
+
+  
+    if (g.removeCd>0) g.removeCd--;
+
+    
+    if (!g.palming && g.handVis) {
+      const [col, row] = screenToCell(g.tipX*W, g.tipY*H, g.yaw, g.pitch, W, H);
+      g.gcol = col;
+      g.grow = row;
+    }
+
+    
+    const curKey = `${g.gcol},${g.grow}`;
+    if (g.pinching && !g.palming && g.handVis) {
+      if (curKey !== g.lastKey && !g.voxels[curKey]) {
+        g.voxels[curKey] = g.colorIdx;
+        g.lastKey = curKey;
+        setBlocks(Object.keys(g.voxels).length);
+      }
+    } else {
+      g.lastKey = null;
+    }
+
+    if (g.fisting && g.removeCd===0 && g.handVis) {
+      if (g.voxels[curKey] !== undefined) {
+        delete g.voxels[curKey];
+        g.removeCd = 10;
+        setBlocks(Object.keys(g.voxels).length);
+      }
+    }
+
+    //Draw background grid lines (always centred — proves it)
+    ctx.save();
+    ctx.strokeStyle = "#ff2dff1a";
+    ctx.lineWidth   = 0.6;
+    const hc = Math.floor(COLS/2);
+    const hr = Math.floor(ROWS/2);
+    // vertical lines
+    for (let c=-hc; c<=hc; c++) {
+      const top = project(c*CELL,  hr*CELL, 0, g.yaw,g.pitch,W,H);
+      const bot = project(c*CELL, -hr*CELL, 0, g.yaw,g.pitch,W,H);
+      if(top&&bot){ ctx.beginPath();ctx.moveTo(top[0],top[1]);ctx.lineTo(bot[0],bot[1]);ctx.stroke(); }
+    }
+    // horizontal lines
+    for (let r=-hr; r<=hr; r++) {
+      const lft = project(-hc*CELL, r*CELL, 0, g.yaw,g.pitch,W,H);
+      const rgt = project( hc*CELL, r*CELL, 0, g.yaw,g.pitch,W,H);
+      if(lft&&rgt){ ctx.beginPath();ctx.moveTo(lft[0],lft[1]);ctx.lineTo(rgt[0],rgt[1]);ctx.stroke(); }
+    }
+    ctx.restore();
+
+    // 8. Depth-sort + draw placed voxels
+    const entries = Object.entries(g.voxels).map(([key,ci])=>{
+      const [col,row] = key.split(",").map(Number);
+      return { col, row, ci, d: cellDepth(col,row,g.yaw,g.pitch,W,H) };
+    });
+    entries.sort((a,b) => b.d - a.d);
+    for (const {col,row,ci} of entries)
+      drawNeonCube(ctx, col,row, g.yaw,g.pitch, W,H, PAL[ci].color, false);
+
+    // 9. Ghost cursor on nearest cell
+    if (g.handVis && !g.palming && !g.voxels[curKey])
+      drawNeonCube(ctx, g.gcol,g.grow, g.yaw,g.pitch, W,H, PAL[g.colorIdx].color, true);
+
+    // 10. HAND EFFECTS (lightweight)
+    if (g.handVis && g.landmarks) {
+      const lm  = g.landmarks;
+      const col = g.pinching ? PAL[g.colorIdx].color
+                : g.palming  ? "#ffd700"
+                : g.fisting  ? "#00ffe7"
+                : "#ff2dff";
+
+      // Skeleton bones
+      const BONES = [
+        [0,1],[1,2],[2,3],[3,4],
+        [0,5],[5,6],[6,7],[7,8],
+        [0,9],[9,10],[10,11],[11,12],
+        [0,13],[13,14],[14,15],[15,16],
+        [0,17],[17,18],[18,19],[19,20],
+        [5,9],[9,13],[13,17],
+      ];
+      ctx.save();
+      ctx.strokeStyle = col + "88";
+      ctx.lineWidth   = 1.5;
+      ctx.shadowColor = col;
+      ctx.shadowBlur  = 8;
+      for (const [a,b] of BONES) {
+        ctx.beginPath();
+        ctx.moveTo(lm[a].x*W, lm[a].y*H);
+        ctx.lineTo(lm[b].x*W, lm[b].y*H);
+        ctx.stroke();
+      }
+
+      // Joint dots — only fingertips get bigger
+      lm.forEach((pt, i) => {
+        const isTip = [4,8,12,16,20].includes(i);
+        ctx.beginPath();
+        ctx.arc(pt.x*W, pt.y*H, isTip ? 5 : 2.5, 0, Math.PI*2);
+        ctx.fillStyle   = col;
+        ctx.shadowBlur  = isTip ? 12 : 4;
+        ctx.fill();
+      });
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
+    // 11. Mode
+    const m = g.palming?"orbit":g.pinching?"build":g.fisting?"erase":"idle";
+    setMode(m);
+
+    rafRef.current = requestAnimationFrame(render);
+  }, []);
+
+  // ── MediaPipe library and camera setup 
+  useEffect(()=>{
+    const video = videoRef.current;
+    if (!video) return;
+    const hands = new Hands({ locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+    hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:.75, minTrackingConfidence:.65 });
+    hands.onResults(results => {
+      const g = G.current;
+      if (results.multiHandLandmarks?.length > 0) {
+        const lm   = results.multiHandLandmarks[0];
+        g.handVis  = true;
+        const pinch = isPinch(lm);               // check pinch first
+        const fist  = !pinch && isFist(lm);      // fist only if NOT pinching
+        const palm  = !pinch && !fist && isOpenPalm(lm); // palm only if neither
+        g.pinching = pinch;
+        g.fisting  = fist;
+        g.palming  = palm;
+        g.tipX     = 1 - lm[8].x;
+        g.tipY     = lm[8].y;
+        const ids  = [0,5,9,13,17];
+        g.palmX    = 1 - ids.reduce((a,i)=>a+lm[i].x,0)/ids.length;
+        g.palmY    =     ids.reduce((a,i)=>a+lm[i].y,0)/ids.length;
+        g.landmarks = lm.map(p=>({ x:(1-p.x), y:p.y }));
+      } else {
+        g.handVis=g.pinching=g.fisting=g.palming=false;
+        g.landmarks=null;
+      }
+    });
+    const cam = new Camera(video, {
+      onFrame: async()=>{ await hands.send({image:video}); },
+      width:1280, height:720,
+    });
+    cam.start().then(()=>{ setReady(true); rafRef.current=requestAnimationFrame(render); });
+    return ()=>{ cam.stop(); hands.close(); cancelAnimationFrame(rafRef.current); };
+  },[render]);
+
+  //  Keyboard controls
+  useEffect(()=>{
+    const g = G.current;
+    const h = e => {
+      if      (e.key==="[")             { const n=(g.colorIdx-1+PAL.length)%PAL.length; g.colorIdx=n; setColorIdx(n); }
+      else if (e.key==="]")             { const n=(g.colorIdx+1)%PAL.length; g.colorIdx=n; setColorIdx(n); }
+      else if (e.key==="r"||e.key==="R") clearWorld();
+      else if (e.key==="ArrowLeft")     g.yaw   +=0.18;
+      else if (e.key==="ArrowRight")    g.yaw   -=0.18;
+      else if (e.key==="ArrowUp")       g.pitch  =Math.max(-1.1,g.pitch-0.15);
+      else if (e.key==="ArrowDown")     g.pitch  =Math.min(1.1, g.pitch+0.15);
+      else if (e.key==="Escape")        { g.yaw=0; g.pitch=0; }
+    };
+    window.addEventListener("keydown",h);
+    return ()=>window.removeEventListener("keydown",h);
+  },[clearWorld]);
+
+  const modeLabel = mode==="build"?"🤏 PLACING"
+    : mode==="orbit"?"🖐 ROTATING VIEW"
+    : mode==="erase"?"✊ ERASING"
+    : "👆 MOVE HAND TO CURSOR";
+
+  return (
+    <div style={{position:"relative",width:"100vw",height:"100vh"}}>
+      <video ref={videoRef} playsInline muted/>
+      <canvas ref={canvasRef}/>
+
+      <div className="hud">
+        <div className="hud-top">
+          <div>
+            <div className="title">NEON VOXEL <b>BUILDER</b></div>
+            <div className="palette">
+              {PAL.map((p,i)=>(
+                <div key={i}
+                  className={`swatch${i===colorIdx?" active":""}`}
+                  style={{
+                    background:p.color+"22",
+                    border:`2px solid ${p.color}`,
+                    boxShadow:i===colorIdx?`0 0 12px ${p.color}`:""
+                  }}
+                  title={p.name}
+                  onClick={()=>pickColor(i)}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="stats">
+            BLOCKS <em>{blocks}</em><br/>
+            COLOR <em>{PAL[colorIdx].name.toUpperCase()}</em>
+          </div>
+        </div>
+
+        <div className="hud-bottom">
+          <div className="hints">
+            <div><b>🤏 PINCH</b> — Place block at cursor</div>
+            <div><b>🖐 OPEN PALM + MOVE</b> — Rotate 3D view</div>
+            <div><b>✊ FIST</b> — Erase &nbsp;|&nbsp; <b>ESC</b> — Reset view &nbsp;|&nbsp; <b>R</b> — Clear</div>
+          </div>
+          <button className="clear-btn" onClick={clearWorld}>⌫ CLEAR</button>
+        </div>
+      </div>
+
+      <div className={`mode-badge m-${mode}`}>{modeLabel}</div>
+
+      <div className="corner tl"/><div className="corner tr"/>
+      <div className="corner bl"/><div className="corner br"/>
+
+      {!ready && (
+        <div className="loading">
+          <h1>NEON VOXEL BUILDER</h1>
+          <p>LOADING HAND TRACKING...</p>
+          <div className="bar"><div className="bar-fill"/></div>
+          <p style={{fontSize:".6rem",color:"rgba(255,45,255,.2)",marginTop:4}}>ALLOW CAMERA WHEN PROMPTED</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
